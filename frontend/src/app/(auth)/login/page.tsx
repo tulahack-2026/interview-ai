@@ -22,6 +22,9 @@ import { PublicOnly } from "@/components/public-only";
 import { useAuthStore } from "@/stores/auth-store";
 import { getApiErrorMessage } from "@/lib/get-api-error-message";
 
+const JUDGE_EMAIL = "test@test.com";
+const JUDGE_PASSWORD = "testtest";
+
 const schema = z.object({
   email: z.string().email("Введите корректный email"),
   password: z.string().min(1, "Введите пароль"),
@@ -48,6 +51,17 @@ export default function LoginPage() {
     }
   };
 
+  const loginAsJudge = async () => {
+    try {
+      await login(JUDGE_EMAIL, JUDGE_PASSWORD);
+      toast.success("Вход выполнен");
+      router.replace("/");
+    } catch (e) {
+      toast.error(getApiErrorMessage(e, "Не удалось войти"));
+    }
+  };
+
+
   return (
     <PublicOnly>
       <Card className="w-full max-w-md shadow-lg">
@@ -57,6 +71,18 @@ export default function LoginPage() {
         </CardHeader>
         <form onSubmit={handleSubmit(onSubmit)}>
           <CardContent className="space-y-4">
+            <div className="rounded-lg border border-blue-200 bg-blue-50 p-3">
+              <p className="mb-2 text-sm font-medium text-blue-800">Быстрый вход для судей</p>
+              <Button
+                type="button"
+                size="sm"
+                className="bg-blue-600 hover:bg-blue-700"
+                onClick={loginAsJudge}
+                disabled={isSubmitting}
+              >
+                Войти как судья
+              </Button>
+            </div>
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
               <Input
