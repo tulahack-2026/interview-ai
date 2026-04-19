@@ -1,0 +1,163 @@
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  SERVICE_NAME: backend
+  DOCKER_REGISTRY: registry.gitlab.com
+  DOCKER_REGISTRY_OWNER: tulahack-2026
+  DOCKER_APP_NAME: backend
+
+  GITLAB_REGISTRY: registry.gitlab.com
+  GITLAB_USER: ${{ secrets.GITLAB_USER }}
+  GITLAB_PASS: ${{ secrets.PAT_TOKEN }}
+
+  DEPLOY_STACK_NAME: backend
+
+  HOST: ${{ secrets.DEPLOY_HOST }}
+  DEPLOY_DIRECTORY: /home/backend
+  SSH_PORT: 22
+
+  SECRET_KEY: ${{ secrets.SECRET_KEY }}
+  YANDEX_CLOUD_FOLDER: ${{ secrets.YANDEX_CLOUD_FOLDER }}
+  YANDEX_CLOUD_API_KEY: ${{ secrets.YANDEX_CLOUD_API_KEY }}
+
+jobs:
+  setup-vars:
+    runs-on: ubuntu-latest
+    outputs:
+      IMAGE_TAG: ${{ steps.image-tag.outputs.IMAGE_TAG }}
+      COMPOSE_FILENAME: ${{ steps.compose.outputs.COMPOSE_FILENAME }}
+      DEPLOY_STACK_FILENAME: ${{ steps.stack1.outputs.DEPLOY_STACK_FILENAME }}
+      DEPLOY_STACK_ENC_FILENAME: ${{ steps.stack2.outputs.DEPLOY_STACK_ENC_FILENAME }}
+
+    steps:
+      - name: ⚒️ Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ➕ Generate IMAGE_TAG with commit short sha
+        id: image-tag
+        run: echo "IMAGE_TAG=`echo ${{ github.sha }} | cut -c1-8`" >> $GITHUB_OUTPUT
+
+      - name: Generate compose filename
+        id: compose
+        run: echo "COMPOSE_FILENAME=`echo docker-compose.${{ steps.image-tag.outputs.IMAGE_TAG }}.yml`" >> $GITHUB_OUTPUT
+
+      - name: Generate stack filenames
+        id: stack1
+        run: echo "DEPLOY_STACK_FILENAME=`echo stack.${{ steps.image-tag.outputs.IMAGE_TAG }}.yml`" >> $GITHUB_OUTPUT
+
+      - name: Generate stack .enc filenames
+        id: stack2
+        run: echo "DEPLOY_STACK_ENC_FILENAME=`echo ${{ steps.stack1.outputs.DEPLOY_STACK_FILENAME }}.enc`" >> $GITHUB_OUTPUT
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [setup-vars]
+    env:
+      IMAGE_TAG: ${{ needs.setup-vars.outputs.IMAGE_TAG }}
+      COMPOSE_FILENAME: ${{ needs.setup-vars.outputs.COMPOSE_FILENAME }}
+      DEPLOY_STACK_FILENAME: ${{ needs.setup-vars.outputs.DEPLOY_STACK_FILENAME }}
+      DEPLOY_STACK_ENC_FILENAME: ${{ needs.setup-vars.outputs.DEPLOY_STACK_ENC_FILENAME }}
+
+    steps:
+      - name: ⚒️ Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create compose file
+        run: |
+          docker compose -f docker/docker-compose.yml -f docker/deploy.yml config > ${COMPOSE_FILENAME}
+
+      - name: Create stack file
+        run: |
+          docker stack config -c docker/docker-compose.yml -c docker/deploy.yml > ${DEPLOY_STACK_FILENAME}
+
+      - name: ✔️ Login to GitLab Registry
+        run: |
+          docker login ${{ env.GITLAB_REGISTRY }} -u ${{ env.GITLAB_USER }} -p ${{ env.GITLAB_PASS }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        run: |
+          docker buildx bake --file ${COMPOSE_FILENAME} \
+            --set "api.cache-from=type=registry,ref=${{ env.GITLAB_REGISTRY }}/${{ env.DOCKER_REGISTRY_OWNER }}/${{ env.DOCKER_APP_NAME }}:cache" \
+            --set "api.cache-to=type=registry,ref=${{ env.GITLAB_REGISTRY }}/${{ env.DOCKER_REGISTRY_OWNER }}/${{ env.DOCKER_APP_NAME }}:cache,mode=max" \
+            --push
+
+      - name: Encrypt stack file
+        run: |
+          openssl enc -aes-256-cbc -salt -pbkdf2 \
+            -in ${DEPLOY_STACK_FILENAME} \
+            -out ${DEPLOY_STACK_ENC_FILENAME} \
+            -pass pass:$SECRET_KEY
+        env:
+          SECRET_KEY: ${{ secrets.SECRET_KEY }}
+
+      - name: Upload stack file to artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stack-file
+          path: ${{ env.DEPLOY_STACK_ENC_FILENAME }}
+
+  deploy:
+    needs: [setup-vars, build]
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_TAG: ${{ needs.setup-vars.outputs.IMAGE_TAG }}
+      COMPOSE_FILENAME: ${{ needs.setup-vars.outputs.COMPOSE_FILENAME }}
+      DEPLOY_STACK_FILENAME: ${{ needs.setup-vars.outputs.DEPLOY_STACK_FILENAME }}
+      DEPLOY_STACK_ENC_FILENAME: ${{ needs.setup-vars.outputs.DEPLOY_STACK_ENC_FILENAME }}
+
+    steps:
+      - name: ⚒️ Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download stack file from artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: stack-file
+          path: .
+
+      - name: Decrypt stack file
+        run: |
+          openssl enc -aes-256-cbc -d -pbkdf2 \
+            -in ${DEPLOY_STACK_ENC_FILENAME} \
+            -out ${DEPLOY_STACK_FILENAME} \
+            -pass pass:$SECRET_KEY
+        env:
+          SECRET_KEY: ${{ secrets.SECRET_KEY }}
+
+      - name: ⚡️ Clone files to server
+        run: |
+          echo "$DEPLOY_SSH_KEY" > deploy_key.pem
+          chmod 600 deploy_key.pem
+          ssh -i deploy_key.pem -o StrictHostKeyChecking=no ${{ env.HOST }} -p ${{ env.SSH_PORT }} \
+            "mkdir -p ${{ env.DEPLOY_DIRECTORY }}"
+          rsync -avz -e 'ssh -i deploy_key.pem -o StrictHostKeyChecking=no -p ${{ env.SSH_PORT }}' \
+            --exclude='.git' ./ ${{ env.HOST }}:${{ env.DEPLOY_DIRECTORY }} --delete
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: ✔️ Login to GitLab Registry on server
+        run: |
+          ssh -i deploy_key.pem -o StrictHostKeyChecking=no ${{ env.HOST }} -p ${{ env.SSH_PORT }} \
+            "docker login ${{ env.GITLAB_REGISTRY }} -u ${{ env.GITLAB_USER }} -p ${{ env.GITLAB_PASS }}"
+
+      - name: 🌐 Create swarm networks
+        run: |
+          ssh -i deploy_key.pem -o StrictHostKeyChecking=no ${{ env.HOST }} -p ${{ env.SSH_PORT }} \
+            "docker network create --driver overlay --attachable backend 2>/dev/null || true && \
+             docker network create --driver overlay --attachable traefik-public 2>/dev/null || true"
+
+      - name: 🐋 Run
+        run: |
+          ssh -i deploy_key.pem -o StrictHostKeyChecking=no ${{ env.HOST }} -p ${{ env.SSH_PORT }} \
+            "cd ${{ env.DEPLOY_DIRECTORY }} && docker stack deploy -c ${DEPLOY_STACK_FILENAME} ${{ env.DEPLOY_STACK_NAME }} --with-registry-auth"

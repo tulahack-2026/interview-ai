@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  frontend:
+    image: ${DOCKER_REGISTRY}/${DOCKER_REGISTRY_OWNER}/${DOCKER_APP_NAME}:${IMAGE_TAG}
+
+    deploy:
+      labels:
+        # prometheus
+        - "prometheus.enable=true"
+        - "prometheus.scrape-port=3000"
+        - "prometheus.job=frontend"
+        # loki
+        - "logging=promtail"
+        - "logging_jobname=containerlogs"
+
+        # traefik
+        - "traefik.enable=true"
+        - "traefik.http.routers.frontend.rule=Host(`interview-ai.ru`)"
+        - "traefik.http.routers.frontend.entrypoints=websecure"
+        - "traefik.http.routers.frontend.tls=true"
+        - "traefik.http.routers.frontend.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.frontend.service=frontend"
+        - "traefik.http.services.frontend.loadbalancer.server.port=3000"
+        - "traefik.swarm.network=traefik-public"
+
+      replicas: 2
+      update_config:
+        parallelism: 3
+        order: start-first
+        failure_action: rollback
+        delay: 10s
+      rollback_config:
+        parallelism: 0
+        order: stop-first
+      restart_policy:
+        condition: any
+        delay: 20s
+        max_attempts: 5
+        window: 120s
+
+    networks:
+      - "default"
+      - "traefik"
+
+networks:
+  default:
+    name: frontend
+    external: true
+  traefik:
+    name: traefik-public
+    external: true

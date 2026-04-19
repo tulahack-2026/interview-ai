@@ -1,0 +1,51 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: app_api
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_NAME: app_api
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      SECRET_KEY: ci-test-secret-key
+      YANDEX_CLOUD_FOLDER: b1gtestfolder
+      YANDEX_CLOUD_API_KEY: test-yandex-api-key
+      YANDEX_CLOUD_BASE_URL: https://ai.api.cloud.yandex.net/v1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Alembic upgrade
+        run: python -m alembic upgrade head
+
+      - name: Pytest
+        run: python -m pytest tests/ -v
